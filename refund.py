@@ -510,6 +510,12 @@ if 'delete_any_pos_reference' not in st.session_state:
     st.session_state.delete_any_pos_reference = ""
 if 'selected_branch' not in st.session_state:
     st.session_state.selected_branch = None
+if 'user_authenticated' not in st.session_state:
+    st.session_state.user_authenticated = False
+if 'user_email' not in st.session_state:
+    st.session_state.user_email = ""
+if 'user_code' not in st.session_state:
+    st.session_state.user_code = ""
 
 # === Environment Variables ===
 @st.cache_data
@@ -518,8 +524,15 @@ def load_config():
         'url': os.getenv('ODOO_URL', 'https://prashanti-sarees.odoo.com/'),
         'db': os.getenv('ODOO_DB', 'ganeshvana-prasanthilive-main-15204134'),
         'username': os.getenv('ODOO_USERNAME', 'admin@test.com'),
-        'password': os.getenv('ODOO_PASSWORD', 'admin@123')
+        'password': os.getenv('ODOO_PASSWORD', 'admin@123'),
+        'user_email': os.getenv('USER_EMAIL', 'user@example.com'),
+        'user_code': os.getenv('USER_CODE', '1234')
     }
+
+def authenticate_user(email, code):
+    """Authenticate user with email and code"""
+    config = load_config()
+    return email == config['user_email'] and code == config['user_code']
 
 # === Branch Configs ===
 @st.cache_data
@@ -746,56 +759,83 @@ def delete_refund_order(pos_reference):
 # === Main App ===
 def main():
     # Sidebar
+    # Sidebar
     with st.sidebar:
-        st.markdown("### 🔐 Connection Status")
-        if not st.session_state.authenticated:
-            if st.button("🔌 Connect to Odoo", use_container_width=True):
-                with st.spinner("Connecting to Odoo..."):
-                    if authenticate():
-                        st.success("✅ Connected successfully!")
+        st.markdown("### 🔐 User Authentication")
+        if not st.session_state.user_authenticated:
+            with st.form("login_form"):
+                st.markdown("**Enter your credentials:**")
+                email = st.text_input("Email", placeholder="user@example.com")
+                code = st.text_input("Access Code", type="password", placeholder="Enter access code")
+                
+                if st.form_submit_button("🔓 Login", use_container_width=True):
+                    if authenticate_user(email, code):
+                        st.session_state.user_authenticated = True
+                        st.session_state.user_email = email
+                        st.session_state.user_code = code
+                        st.success("✅ User authenticated!")
                         st.rerun()
                     else:
-                        st.error("❌ Connection failed!")
+                        st.error("❌ Invalid credentials!")
         else:
-            st.success("✅ Connected to Odoo")
-            if st.button("🔌 Disconnect", use_container_width=True):
+            st.success(f"✅ Welcome, {st.session_state.user_email}")
+            if st.button("🔓 Logout", use_container_width=True):
+                st.session_state.user_authenticated = False
                 st.session_state.authenticated = False
                 st.session_state.models = None
                 st.session_state.uid = None
                 st.rerun()
         
-        # Delete Refund Section
-        # In your sidebar section where the delete functionality is:
-        if st.session_state.authenticated:
+        if st.session_state.user_authenticated:
             st.markdown("---")
-            st.markdown("### 🗑️ Delete Any Order")
-            
-            # Second text input for any orders
-            any_pos_reference = st.text_input(
-                "Enter any POS Reference to delete",
-                key="delete_any_pos_reference",
-                value=st.session_state.get("delete_any_pos_reference", "")
-            )
-            if st.button("❌ Delete Any Order", use_container_width=True):
-                if delete_any_order(any_pos_reference):
+            st.markdown("### 🔐 Odoo Connection")
+            if not st.session_state.authenticated:
+                if st.button("🔌 Connect to Odoo", use_container_width=True):
+                    with st.spinner("Connecting to Odoo..."):
+                        if authenticate():
+                            st.success("✅ Connected successfully!")
+                            st.rerun()
+                        else:
+                            st.error("❌ Connection failed!")
+            else:
+                st.success("✅ Connected to Odoo")
+                if st.button("🔌 Disconnect", use_container_width=True):
+                    st.session_state.authenticated = False
+                    st.session_state.models = None
+                    st.session_state.uid = None
                     st.rerun()
+            
+            # Delete Refund Section
+            if st.session_state.authenticated:
+                st.markdown("---")
+                st.markdown("### 🗑️ Delete Any Order")
+                
+                # Second text input for any orders
+                any_pos_reference = st.text_input(
+                    "Enter any POS Reference to delete",
+                    key="delete_any_pos_reference",
+                    value=st.session_state.get("delete_any_pos_reference", "")
+                )
+                if st.button("❌ Delete Any Order", use_container_width=True):
+                    if delete_any_order(any_pos_reference):
+                        st.rerun()
 
-            st.markdown("---")
-            st.markdown("### 🗑️ Delete Refund Order")
-            
-            # First text input for refund orders
-            refund_pos_reference = st.text_input(
-                "Enter POS Reference to delete (Refund)",
-                key="delete_ref_pos_reference",
-                value=st.session_state.get("delete_ref_pos_reference", "")
-            )
-            if st.button("❌ Delete Refund", use_container_width=True):
-                if delete_refund_order(refund_pos_reference):
-                    st.rerun()
+                st.markdown("---")
+                st.markdown("### 🗑️ Delete Refund Order")
+                
+                # First text input for refund orders
+                refund_pos_reference = st.text_input(
+                    "Enter POS Reference to delete (Refund)",
+                    key="delete_ref_pos_reference",
+                    value=st.session_state.get("delete_ref_pos_reference", "")
+                )
+                if st.button("❌ Delete Refund", use_container_width=True):
+                    if delete_refund_order(refund_pos_reference):
+                        st.rerun()
 
     # Main content
-    if not st.session_state.authenticated:
-        st.info("👆 Please connect to Odoo using the sidebar to get started.")
+    if not st.session_state.user_authenticated:
+        st.info("👆 Please authenticate using the sidebar to get started.")
         
         # Show branch information
         st.markdown("### 🏢 Available Branches")
@@ -812,6 +852,10 @@ def main():
                     <p><strong>Payment:</strong> {config['payment_method']}</p>
                 </div>
                 """, unsafe_allow_html=True)
+        return
+
+    if not st.session_state.authenticated:
+        st.info("👆 Please connect to Odoo using the sidebar to get started.")
         return
 
     # Connected - Show main interface
@@ -837,15 +881,30 @@ def main():
         
     with col2:
         today = date.today()
-        target_date = st.date_input(
-            "Refund Date",
-            value=today,
-            max_value=today,
-            key="date_select"
-        )
+        col2a, col2b = st.columns(2)
+        with col2a:
+            start_date = st.date_input(
+                "Start Date",
+                value=today,
+                max_value=today,
+                key="start_date_select"
+            )
+        with col2b:
+            end_date = st.date_input(
+                "End Date",
+                value=today,
+                max_value=today,
+                key="end_date_select"
+            )
+        
+        if start_date > end_date:
+            st.error("Start date must be before or equal to end date")
 
     if st.button("🔍 Load Orders", use_container_width=True):
-        load_orders(selected_branch, target_date.strftime('%Y-%m-%d'))
+        if start_date <= end_date:
+            load_orders(selected_branch, start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'))
+        else:
+            st.error("Please select a valid date range")
 
     if st.session_state.all_orders:
         st.markdown("### 📋 Step 2: Loaded Orders")
@@ -968,16 +1027,15 @@ def main():
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("✅ Process Refund", type="primary", use_container_width=True):
-                    # Update selected orders with only the checked ones
                     st.session_state.selected_orders = selected_orders
-                    process_refund(selected_branch, target_date.strftime('%Y-%m-%d'))
+                    process_refund(selected_branch, start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'))
             with col2:
                 if st.button("❌ Cancel", use_container_width=True):
                     st.session_state.selected_orders = []
                     st.rerun()
 
-def load_orders(branch, date):
-    """Load orders for the selected branch and date"""
+def load_orders(branch, start_date, end_date):
+    """Load orders for the selected branch and date range"""
     with st.spinner("Loading orders..."):
         try:
             branch_configs = get_branch_configs()
@@ -1011,8 +1069,8 @@ def load_orders(branch, date):
                     ['config_id', '=', config['id']],
                     ['payment_ids.payment_method_id', 'in', cash_ids],
                     ['state', '=', 'done'],
-                    ['date_order', '>=', f"{date} 00:00:00"],
-                    ['date_order', '<=', f"{date} 23:59:59"],
+                    ['date_order', '>=', f"{start_date} 00:00:00"],
+                    ['date_order', '<=', f"{end_date} 23:59:59"],
                     ['note', 'not ilike', 'REFUNDED']
                 ]])
                 
@@ -1039,7 +1097,7 @@ def load_orders(branch, date):
                     all_orders.append(order)
             
             st.session_state.all_orders = all_orders
-            st.success(f"✅ Loaded {len(all_orders)} cash orders for {branch} on {date}")
+            st.success(f"✅ Loaded {len(all_orders)} cash orders for {branch} from {start_date} to {end_date}")
             
         except Exception as e:
             st.error(f"❌ Error loading orders: {str(e)}")
