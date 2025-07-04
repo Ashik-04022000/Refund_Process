@@ -516,6 +516,10 @@ if 'user_email' not in st.session_state:
     st.session_state.user_email = ""
 if 'user_code' not in st.session_state:
     st.session_state.user_code = ""
+if 'current_session' in st.session_state:
+    del st.session_state.current_session
+if 'session_sequence' in st.session_state:
+    del st.session_state.session_sequence
 
 # === Environment Variables ===
 @st.cache_data
@@ -604,33 +608,81 @@ def close_existing_sessions(models, db, uid, password, config_id):
         models.execute_kw(db, uid, password, 'pos.session', 'close_session_from_ui', [[session_id]])
 
 def generate_pos_reference(models, db, uid, password, session_name, config_id, order_index):
+    """
+    Generate sequential pos_reference numbers for refund orders in a session.
+    Format: {session_id_number}-001-{sequential_number:04d}
     
-    # Get the session ID number (e.g., "02996" from "POS/02996")
-    session_id_number = session_name.split('/')[-1]
+    Args:
+        models: Odoo models object
+        db: Database name
+        uid: User ID
+        password: Password
+        session_name: Name of the POS session (e.g., "Session 02977" or "POS/03014")
+        config_id: ID of the POS config
+        order_index: Index of current order in the refund batch (0-based)
     
-    # Get the current session ID
-    session_ids = models.execute_kw(db, uid, password, 'pos.session', 'search', [[
-        ['name', '=', session_name],
-        ['state', '=', 'opened']
-    ]])
+    Returns:
+        str: Generated pos_reference (e.g., "02977-001-0028" or "03014-001-0001")
+    """
+    # Reset sequence tracking at the start of each refund session
+    if 'current_session' not in st.session_state or st.session_state.current_session != session_name:
+        st.session_state.current_session = session_name
+        st.session_state.session_sequence = 0
     
-    if not session_ids:
-        st.error("No active POS session found")
-        return None
+    # Extract session number from different possible formats
+    session_id_number = None
     
-    # Count existing orders in this session
-    existing_orders = models.execute_kw(db, uid, password, 'pos.order', 'search_count', [[
-        ['session_id', '=', session_ids[0]],
-        ['pos_reference', '!=', False]
-    ]])
+    # Try to extract from "Session XXXXX" format
+    if "Session" in session_name:
+        session_id_number = session_name.split()[-1]
+    # Try to extract from "POS/XXXXX" format
+    elif "/" in session_name:
+        session_id_number = session_name.split("/")[-1]
+    # Fallback to taking the last numeric part
+    else:
+        # Extract all numbers from the string
+        numbers = re.findall(r'\d+', session_name)
+        if numbers:
+            session_id_number = numbers[-1]
     
-    # Calculate next sequence number (existing_orders + 1)
-    sequence_number = existing_orders + 1
+    if not session_id_number:
+        raise ValueError(f"Could not extract session number from: {session_name}")
+
+    # Find the highest existing sequence number for this config
+    existing_orders = models.execute_kw(
+        db, uid, password, 
+        'pos.order', 'search_read',
+        [[
+            ['config_id', '=', config_id],
+            ['pos_reference', '!=', False]
+        ]],
+        {
+            'fields': ['pos_reference'],
+            'order': 'id desc',
+            'limit': 1
+        }
+    )
     
-    # Generate the reference
-    pos_reference = f"{int(session_id_number):05d}-001-{sequence_number:04d}"
+    # Determine base sequence number
+    base_sequence = 0
+    if existing_orders:
+        last_ref = existing_orders[0]['pos_reference']
+        # Extract sequence from format XXXXX-XXX-XXXX
+        match = re.search(r'\d{5}-\d{3}-(\d{4})$', last_ref)
+        if match:
+            base_sequence = int(match.group(1))
     
-    return pos_reference
+    # Calculate this order's sequence number
+    sequence_number = base_sequence + st.session_state.session_sequence + 1
+    st.session_state.session_sequence += 1  # Increment for next order
+    
+    # Format the reference with leading zeros
+    try:
+        session_num = int(session_id_number)
+        return f"{session_num:05d}-001-{sequence_number:04d}"
+    except ValueError:
+        # If session number can't be converted to int, use it as-is
+        return f"{session_id_number}-001-{sequence_number:04d}"
 
 # === Authentication ===
 def authenticate():
@@ -1028,7 +1080,7 @@ def main():
             with col1:
                 if st.button("✅ Process Refund", type="primary", use_container_width=True):
                     st.session_state.selected_orders = selected_orders
-                    process_refund(selected_branch, start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'))
+                    process_refund(selected_branch)
             with col2:
                 if st.button("❌ Cancel", use_container_width=True):
                     st.session_state.selected_orders = []
@@ -1127,7 +1179,7 @@ def find_best_combination(refund_target):
         else:
             st.error("❌ No matching combination found")
 
-def process_refund(branch, date):
+def process_refund(branch):
     """Process the refund for selected orders"""
     with st.spinner("Processing refund..."):
         try:
@@ -1142,6 +1194,7 @@ def process_refund(branch, date):
             password = st.session_state.config['password']
             db = st.session_state.config['db']
             
+            # Get target config and payment method
             target_config = get_pos_config(models, db, uid, password, target_config_name)
             payment_method = get_payment_method_by_name_and_company(models, db, uid, password, payment_method_name, company_id)
             
@@ -1149,13 +1202,16 @@ def process_refund(branch, date):
                 st.error("❌ Payment method not found")
                 return
             
+            # Close any existing sessions
             close_existing_sessions(models, db, uid, password, target_config['id'])
-            
+
+            # Ensure payment method is attached to the POS config
             if payment_method['id'] not in target_config['payment_method_ids']:
                 models.execute_kw(db, uid, password, 'pos.config', 'write', [[target_config['id']], {
                     'payment_method_ids': [(4, payment_method['id'])]
                 }])
             
+            # Create and open a new session
             session_id = models.execute_kw(db, uid, password, 'pos.session', 'create', [{'config_id': target_config['id']}])
             models.execute_kw(db, uid, password, 'pos.session', 'write', [[session_id], {'state': 'opened'}])
             session_name = models.execute_kw(db, uid, password, 'pos.session', 'read', [[session_id]], {'fields': ['name']})[0]['name']
@@ -1163,6 +1219,7 @@ def process_refund(branch, date):
             refund_details = []
             
             for index, selected_order in enumerate(st.session_state.selected_orders):
+                # Read original order details
                 original = models.execute_kw(db, uid, password, 'pos.order', 'read', [[selected_order['id']]], {'fields': ['lines', 'partner_id', 'name']})[0]
                 order_lines = models.execute_kw(db, uid, password, 'pos.order.line', 'read', [original['lines']], {
                     'fields': ['product_id', 'qty', 'price_unit', 'discount', 'full_product_name', 'pack_lot_ids']
@@ -1171,23 +1228,28 @@ def process_refund(branch, date):
                 refund_lines = []
                 total = 0.0
                 
+                # Build refund lines (negative quantities)
                 for line in order_lines:
                     qty = -line['qty']
                     price = line['price_unit']
                     discount = line.get('discount', 0)
                     subtotal = qty * price * (1 - discount/100)
                     refund_lines.append((0, 0, {
-                        'product_id': line['product_id'][0], 'qty': qty, 'price_unit': price,
-                        'discount': discount, 'price_subtotal': subtotal, 'price_subtotal_incl': subtotal,
+                        'product_id': line['product_id'][0],
+                        'qty': qty,
+                        'price_unit': price,
+                        'discount': discount,
+                        'price_subtotal': subtotal,
+                        'price_subtotal_incl': subtotal,
                         'full_product_name': line.get('full_product_name', ''),
                         'pack_lot_ids': [(6, 0, line.get('pack_lot_ids', []))]
                     }))
                     total += subtotal
                 
+                # Get original config (for pos_reference format)
                 original_config = get_pos_config(models, db, uid, password, selected_order['config_name'])
                 pos_reference = generate_pos_reference(models, db, uid, password, session_name, original_config['id'], index)
                 
-                # Use the original order name with "REFUND" appended
                 refund_name = f"{original['name']} REFUND"
                 
                 refund_vals = {
@@ -1197,7 +1259,10 @@ def process_refund(branch, date):
                     'session_id': session_id,
                     'partner_id': original['partner_id'][0] if original['partner_id'] else False,
                     'lines': refund_lines,
-                    'payment_ids': [(0, 0, {'amount': total, 'payment_method_id': payment_method['id']})],
+                    'payment_ids': [(0, 0, {
+                        'amount': total,
+                        'payment_method_id': payment_method['id']
+                    })],
                     'amount_paid': total,
                     'amount_total': total,
                     'amount_tax': 0.0,
@@ -1212,16 +1277,17 @@ def process_refund(branch, date):
                     'amount': total
                 })
                 
+                # Update original order note
                 note_append = f"[REFUNDED to {refund_name} on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]"
                 updated_note = (selected_order.get('note') or '') + ' ' + note_append
                 models.execute_kw(db, uid, password, 'pos.order', 'write', [[selected_order['id']], {'note': updated_note}])
             
+            # Close refund session
             models.execute_kw(db, uid, password, 'pos.session', 'write', [[session_id], {'state': 'closing_control'}])
             models.execute_kw(db, uid, password, 'pos.session', 'close_session_from_ui', [[session_id]])
             
-            # Show success message
+            # UI output
             st.success("🎉 Refund processed successfully!")
-            
             for detail in refund_details:
                 st.markdown(f"""
                 <div class="success-card">
@@ -1231,11 +1297,11 @@ def process_refund(branch, date):
             
             st.info(f"🔒 Refund session closed for {target_config_name}")
             
-            # Reset state
+            # Clear selections after processing
             st.session_state.selected_orders = []
             st.session_state.filtered_orders = []
             st.session_state.all_orders = []
-            
+        
         except Exception as e:
             st.error(f"❌ Error processing refund: {str(e)}")
 
