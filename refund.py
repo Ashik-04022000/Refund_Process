@@ -560,6 +560,12 @@ def get_branch_configs():
             "target_config": "MLM Billing 3",
             "payment_method": "Cash 3",
             "company_id": 6
+        },
+        "SAREE TRAILS": {
+            "source_configs": ["PUNE 1", "PUNE 2", "PUNE 3", "PUNE 4", "PUNE 5", "PUNE 6", "PUNE 7", "PUNE 8", "PUNE 9", "PUNE 10", "PUNE 11", "PUNE 12", "PUNE 13", "PUNE 14", "PUNE 15"],
+            "target_config": "PUNE 9",
+            "payment_method": "Cash 9",
+            "company_id": 5
         }
     }
 
