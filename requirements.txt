@@ -1,0 +1,4 @@
+streamlit
+xmlrpc-client
+python-dotenv
+pandas
