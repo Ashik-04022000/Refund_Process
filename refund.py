@@ -609,38 +609,16 @@ def close_existing_sessions(models, db, uid, password, config_id):
 
 def generate_pos_reference(models, db, uid, password, session_name, config_id, order_index):
     """
-    Generate sequential pos_reference numbers for refund orders in a session.
-    Format: {session_id_number}-001-{sequential_number:04d}
-    
-    Args:
-        models: Odoo models object
-        db: Database name
-        uid: User ID
-        password: Password
-        session_name: Name of the POS session (e.g., "Session 02977" or "POS/03014")
-        config_id: ID of the POS config
-        order_index: Index of current order in the refund batch (0-based)
-    
-    Returns:
-        str: Generated pos_reference (e.g., "02977-001-0028" or "03014-001-0001")
+    Generate pos_reference in format: {session_id_number}-001-{nth_refund_in_session:04d}
+    The nth_refund is determined by counting how many refunds have already been created in this session.
     """
-    # Reset sequence tracking at the start of each refund session
-    if 'current_session' not in st.session_state or st.session_state.current_session != session_name:
-        st.session_state.current_session = session_name
-        st.session_state.session_sequence = 0
-    
-    # Extract session number from different possible formats
+    # Extract session number
     session_id_number = None
-    
-    # Try to extract from "Session XXXXX" format
     if "Session" in session_name:
         session_id_number = session_name.split()[-1]
-    # Try to extract from "POS/XXXXX" format
     elif "/" in session_name:
         session_id_number = session_name.split("/")[-1]
-    # Fallback to taking the last numeric part
     else:
-        # Extract all numbers from the string
         numbers = re.findall(r'\d+', session_name)
         if numbers:
             session_id_number = numbers[-1]
@@ -648,41 +626,16 @@ def generate_pos_reference(models, db, uid, password, session_name, config_id, o
     if not session_id_number:
         raise ValueError(f"Could not extract session number from: {session_name}")
 
-    # Find the highest existing sequence number for this config
-    existing_orders = models.execute_kw(
-        db, uid, password, 
-        'pos.order', 'search_read',
-        [[
-            ['config_id', '=', config_id],
-            ['pos_reference', '!=', False]
-        ]],
-        {
-            'fields': ['pos_reference'],
-            'order': 'id desc',
-            'limit': 1
-        }
-    )
-    
-    # Determine base sequence number
-    base_sequence = 0
-    if existing_orders:
-        last_ref = existing_orders[0]['pos_reference']
-        # Extract sequence from format XXXXX-XXX-XXXX
-        match = re.search(r'\d{5}-\d{3}-(\d{4})$', last_ref)
-        if match:
-            base_sequence = int(match.group(1))
-    
-    # Calculate this order's sequence number
-    sequence_number = base_sequence + st.session_state.session_sequence + 1
-    st.session_state.session_sequence += 1  # Increment for next order
-    
-    # Format the reference with leading zeros
-    try:
-        session_num = int(session_id_number)
-        return f"{session_num:05d}-001-{sequence_number:04d}"
-    except ValueError:
-        # If session number can't be converted to int, use it as-is
-        return f"{session_id_number}-001-{sequence_number:04d}"
+    # Count existing refund orders in the current session
+    order_ids = models.execute_kw(db, uid, password, 'pos.order', 'search_read', [[
+        ['session_id.name', '=', session_name],
+        ['pos_reference', 'ilike', f"{session_id_number}-001-"]
+    ]], {'fields': ['pos_reference'], 'order': 'id asc'})
+
+    existing_refund_count = len(order_ids)
+    nth_refund = existing_refund_count + 1
+
+    return f"{int(session_id_number):05d}-001-{nth_refund:04d}"
 
 # === Authentication ===
 def authenticate():
@@ -737,6 +690,7 @@ def delete_any_order(pos_reference):
             # Step 4: Now delete it
             models.execute_kw(db, uid, password, 'pos.order', 'unlink', [[order_id]])
             st.success(f"POS Order with reference '{pos_reference}' deleted successfully!")
+            st.session_state.delete_ref_pos_reference = ""  # Clear input box
             
             # Instead of modifying session state, return a value that will trigger a rerun
             return True
@@ -746,7 +700,6 @@ def delete_any_order(pos_reference):
         return False
 
 def delete_refund_order(pos_reference):
-
     if not pos_reference:
         st.error("Please enter a valid POS reference")
         return False
@@ -765,47 +718,58 @@ def delete_refund_order(pos_reference):
                 st.error(f"No refund order found with reference '{pos_reference}'")
                 return False
 
-            refund_order = models.execute_kw(db, uid, password, 'pos.order', 'read', [refund_ids], {'fields': ['id', 'name', 'pos_reference']})[0]
-            refund_name = refund_order['name']
+            refund_order = models.execute_kw(db, uid, password, 'pos.order', 'read', [refund_ids], {
+                'fields': ['id', 'name', 'note', 'pos_reference']
+            })[0]
             refund_order_id = refund_order['id']
+            refund_name = refund_order['name']
 
             if not refund_name.endswith("REFUND"):
                 st.warning("The order doesn't appear to be a refund (missing 'REFUND' in name). Skipping note cleanup.")
-                return False
-
-            # === Step 2: Derive and find original order ===
-            original_name = refund_name.replace(" REFUND", "").strip()
-            original_ids = models.execute_kw(db, uid, password, 'pos.order', 'search', [[['name', '=', original_name]]])
-
-            if not original_ids:
-                st.warning(f"Could not find original order with name '{original_name}'")
             else:
-                original_order = models.execute_kw(db, uid, password, 'pos.order', 'read', [original_ids], {'fields': ['id', 'name', 'note']})[0]
-                original_note = original_order.get('note') or ''
-                cleaned_lines = [line for line in original_note.split('\n') if 'REFUNDED' not in line.upper()]
-                cleaned_note = '\n'.join(cleaned_lines).strip()
+                # === Step 2: Find and clean note of original order ===
+                original_name = refund_name.replace(" REFUND", "").strip()
+                original_ids = models.execute_kw(db, uid, password, 'pos.order', 'search', [[['name', '=', original_name]]])
 
-                if cleaned_note != original_note:
-                    models.execute_kw(db, uid, password, 'pos.order', 'write', [[original_order['id']], {'note': cleaned_note}])
-                    st.success(f"✅ Cleaned note in original order: {original_order['name']}")
+                if not original_ids:
+                    st.warning(f"⚠️ Could not find original order with name '{original_name}'")
                 else:
-                    st.info("ℹ️ Original order note is already clean.")
+                    original_order = models.execute_kw(db, uid, password, 'pos.order', 'read', [original_ids], {'fields': ['id', 'note']})[0]
+                    original_note = original_order.get('note') or ''
+                    cleaned_lines = [line for line in original_note.split('\n') if 'REFUNDED' not in line.upper()]
+                    cleaned_note = '\n'.join(cleaned_lines).strip()
 
-            # === Step 3: Unlink refund order's payments ===
+                    if cleaned_note != original_note:
+                        models.execute_kw(db, uid, password, 'pos.order', 'write', [[original_order['id']], {'note': cleaned_note}])
+                        st.success(f"✅ Cleaned note in original order: {original_name}")
+                    else:
+                        st.info(f"ℹ️ Original order '{original_name}' note already clean.")
+
+                # === Step 3: Clean refund order note as well ===
+                refund_note = refund_order.get('note') or ''
+                cleaned_refund_note = "\n".join([line for line in refund_note.split("\n") if 'REFUNDED' not in line.upper()]).strip()
+
+                if cleaned_refund_note != refund_note:
+                    models.execute_kw(db, uid, password, 'pos.order', 'write', [[refund_order_id], {'note': cleaned_refund_note}])
+                    st.success(f"✅ Cleaned note in refund order: {refund_name}")
+                else:
+                    st.info(f"ℹ️ Refund order '{refund_name}' note already clean.")
+
+            # === Step 4: Unlink refund order payments ===
             payment_ids = models.execute_kw(db, uid, password, 'pos.payment', 'search', [[['pos_order_id', '=', refund_order_id]]])
             if payment_ids:
                 models.execute_kw(db, uid, password, 'pos.payment', 'unlink', [payment_ids])
                 st.info(f"🗑️ Deleted {len(payment_ids)} payment(s) from refund order")
 
-            # === Step 4: Cancel & delete refund order ===
+            # === Step 5: Cancel and delete refund order ===
             models.execute_kw(db, uid, password, 'pos.order', 'write', [[refund_order_id], {'state': 'cancel'}])
             models.execute_kw(db, uid, password, 'pos.order', 'unlink', [[refund_order_id]])
             st.success(f"🗑️ Deleted refund order: {refund_name}")
-
+            st.session_state.delete_ref_pos_reference = ""  # Clear input box
             return True
 
     except Exception as e:
-        st.error(f"❌ Error: {str(e)}")
+        st.error(f"❌ Error deleting refund order: {str(e)}")
         return False
 
 # === Main App ===
@@ -1281,7 +1245,9 @@ def process_refund(branch):
                 note_append = f"[REFUNDED to {refund_name} on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]"
                 updated_note = (selected_order.get('note') or '') + ' ' + note_append
                 models.execute_kw(db, uid, password, 'pos.order', 'write', [[selected_order['id']], {'note': updated_note}])
-            
+                # Also write the note into the refund order
+                models.execute_kw(db, uid, password, 'pos.order', 'write', [[refund_order_id], {'note': note_append}])
+
             # Close refund session
             models.execute_kw(db, uid, password, 'pos.session', 'write', [[session_id], {'state': 'closing_control'}])
             models.execute_kw(db, uid, password, 'pos.session', 'close_session_from_ui', [[session_id]])
