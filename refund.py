@@ -1125,23 +1125,25 @@ def filter_orders(min_amt, max_amt):
     st.success(f"✅ Filtered to {len(filtered)} orders in range ₹{min_amt:,.2f} - ₹{max_amt:,.2f}")
 
 def find_best_combination(refund_target):
-    """Find the best combination of orders for refund"""
+    """Fast greedy approach to find best combination close to target"""
     with st.spinner("Finding best combination..."):
-        best_match = None
-        min_remaining = float('inf')
-        
-        for r in range(1, min(5, len(st.session_state.filtered_orders)+1)):
-            for combo in combinations(st.session_state.filtered_orders, r):
-                total = sum(o['amount_total'] for o in combo)
-                if total <= refund_target and (refund_target - total) < min_remaining:
-                    best_match = combo
-                    min_remaining = refund_target - total
-        
-        if best_match:
-            st.session_state.selected_orders = list(best_match)
-            st.success(f"✅ Found best combination with {len(best_match)} orders")
+        orders = sorted(st.session_state.filtered_orders, key=lambda x: x['amount_total'], reverse=True)
+
+        best_combo = []
+        current_total = 0.0
+
+        for order in orders:
+            if current_total + order['amount_total'] <= refund_target:
+                best_combo.append(order)
+                current_total += order['amount_total']
+                if abs(current_total - refund_target) < 1e-2:  # Allow small float difference
+                    break
+
+        if best_combo:
+            st.session_state.selected_orders = best_combo
+            st.success(f"✅ Found best combination with {len(best_combo)} orders (Total ₹{current_total:,.2f})")
         else:
-            st.error("❌ No matching combination found")
+            st.error("❌ No suitable combination found")
 
 def process_refund(branch):
     """Process the refund for selected orders"""
